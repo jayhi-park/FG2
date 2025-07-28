@@ -14,11 +14,16 @@ from models.model_kitti import CVM
 from models.modules import DinoExtractor
 from utils.utils import weighted_procrustes_2d, create_metric_grid, create_grid_indices, save_metric
 from utils.loss import compute_vce_loss, compute_infonce_loss_kitti
+from tqdm import tqdm
+from utils.wandb_logger import WandbLogger
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-b', '--batch_size', type=int, help='batch size', default=24)
+parser.add_argument('-tb', '--test_batch_size', type=int, help='batch size', default=24)
 parser.add_argument('-t', '--train_or_test', type=str, choices=('train','test'))
 parser.add_argument('--epoch_to_resume', type=int, help='from which epoch to continue training', default=0)
+parser.add_argument('--wandb', '-wb', action='store_true', help='Turn on wandb log')
+parser.add_argument('--save', type=str)
 
 args = vars(parser.parse_args())
 batch_size = args['batch_size']
@@ -174,15 +179,25 @@ def eval(CVM_model, test_set):
         return np.array(translation_error), np.array(yaw_error), np.array(longitudinal_error), np.array(lateral_error)
 
 if train_or_test == 'train':
+    if args['wandb']:
+        wandb_config = dict(project="360_cvgl", entity='jayhi-park', name=args['save'])
+        wandb_logger = WandbLogger(wandb_config, args)
+    else:
+        wandb_logger = WandbLogger(None)
+    wandb_logger.before_run()
+
     label = (
         f"KITTI"
         f"_grd_bev_res_{grd_bev_res}_grd_height_res_{grd_height_res}"
         f"_sat_bev_res_{sat_bev_res}_learning_rate_{learning_rate}"
     )
     print(label)
+
+    save = args['save']
+    model_path = os.path.join('/ws/LTdata/FG2/checkpoints/KITTI', save)
     
     if epoch_to_resume > 0:
-        CVM_model.load_state_dict(torch.load(os.path.join('checkpoints/KITTI', label, str(epoch_to_resume-1), 'model.pt')))
+        CVM_model.load_state_dict(torch.load(os.path.join(model_path, str(epoch_to_resume-1), 'model.pt')))
     
     CVM_model.to(device)
     for param in CVM_model.parameters():
@@ -193,12 +208,13 @@ if train_or_test == 'train':
     optimizer = torch.optim.Adam(params, lr=learning_rate, betas=(0.9, 0.999))
     
     global_step = 0    
-    
+
+    wandb_features = dict()
     for epoch in range(epoch_to_resume, 100):
         CVM_model.train()
         running_loss = 0.0
     
-        for i, data in enumerate(train_loader):
+        for i, data in enumerate(tqdm(train_loader)):
             sat, grd, camera_k, tgt, Rgt = data
             
             B, _, sat_size, _ = sat.size()
@@ -257,9 +273,13 @@ if train_or_test == 'train':
             optimizer.step()
             global_step += 1
 
+            # log wandb features
+            wandb_features['train/loss'] = np.round(avg_loss.item(), decimals=4)
+            wandb_logger.log_evaluate(wandb_features)
+
     
         # Save model
-        model_dir = f'checkpoints/KITTI/{label}/{epoch}/'
+        model_dir = f'{model_path}/{epoch}/'
         os.makedirs(model_dir, exist_ok=True)
         print(f'Saving checkpoint at {model_dir}')
         torch.save(CVM_model.cpu().state_dict(), model_dir + 'model.pt')
@@ -268,10 +288,11 @@ if train_or_test == 'train':
         # Evaluation
         print('Evaluating...')
 
-        results_dir = f'results/kitti/{label}/'
+        results_dir = f'/ws/LTdata/FG2/results/kitti/{save}/'
         os.makedirs(results_dir, exist_ok=True)
 
         for test_set in ['test1', 'test2']:
+            wandb_features = dict()
             translation_error, yaw_error, _, _ = eval(CVM_model, test_set)
             trans_mean, trans_median = np.mean(translation_error), np.median(translation_error)
             yaw_mean, yaw_median = np.mean(yaw_error), np.median(yaw_error)
@@ -283,12 +304,19 @@ if train_or_test == 'train':
             save_metric(results_dir + 'Median_distance_error.txt', trans_median, test_set +'_median_distance_error', epoch)
             save_metric(results_dir + 'Mean_orientation_error.txt', yaw_mean, test_set +'_mean_yaw_error', epoch)
             save_metric(results_dir + 'Median_orientation_error.txt', yaw_median, test_set +'_median_yaw_error', epoch)
-        
+
+            # log wandb features
+            wandb_features[f'{test_set}/shift_dis'] = trans_mean
+            wandb_features[f'{test_set}/shift_dis_median'] = trans_median
+            wandb_features[f'{test_set}/shift_rot'] = yaw_mean
+            wandb_features[f'{test_set}/shift_rot_median'] = yaw_median
+            wandb_logger.log_evaluate(wandb_features)
 if train_or_test == 'test':
-    CVM_model.load_state_dict(torch.load(os.path.join('checkpoints/KITTI', 'model.pt')))
+    model_dir = f'/ws/LTdata/FG2/checkpoints/KITTI/{epoch}/'
+    CVM_model.load_state_dict(torch.load(os.path.join(model_dir, 'model.pt')))
     CVM_model.to(device)
     
-    results_dir = os.path.join('results', 'kitti')
+    results_dir = os.path.join('/ws/LTdata/FG2/results', 'kitti')
     os.makedirs(results_dir, exist_ok=True)
 
     for test_set in ['test1', 'test2']:

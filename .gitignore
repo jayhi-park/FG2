@@ -1,0 +1,10 @@
+checkpoints/
+__pycache__/
+att_layers/__pycache__/
+dataloaders/__pycache__/
+utils/__pycache__/
+DINO_modules/__pycache__/
+DINO_modules/layers/__pycache__/
+models/__pycache__/
+.idea/
+wandb/
